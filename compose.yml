@@ -125,6 +125,17 @@ services:
   dynamodb:
     image: amazon/dynamodb-local:latest
     command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
+  dynamodb-init:
+    image: togglemaster/analytics-service:local
+    build:
+      context: ./analytics-service
+    entrypoint: ["python", "/local/init-dynamodb.py"]
+    volumes:
+      - ./local/init-dynamodb.py:/local/init-dynamodb.py:ro
+    depends_on:
+      dynamodb:
+        condition: service_started
+    restart: "no"
 
   analytics-service:
     image: togglemaster/analytics-service:local
@@ -144,9 +155,8 @@ services:
     depends_on:
       sqs:
         condition: service_started
-      dynamodb:
-        condition: service_started
-
+      dynamodb-init:
+        condition: service_completed_successfully
 volumes:
   auth-db-data:
   flag-db-data:
