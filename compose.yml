@@ -136,6 +136,7 @@ services:
 
   evaluation-service:
     image: togglemaster/evaluation-service:local
+    stop_grace_period: 50s
     build:
       context: ./evaluation-service
     environment:
@@ -167,6 +168,7 @@ services:
 
   analytics-service:
     image: togglemaster/analytics-service:local
+    stop_grace_period: 50s
     build:
       context: ./analytics-service
     environment:
