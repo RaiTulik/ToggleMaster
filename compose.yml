@@ -119,6 +119,21 @@ services:
         condition: service_started
     restart: "no"
 
+  service-key-init:
+    image: togglemaster/service-key-init:local
+    build:
+      context: ./local
+      dockerfile: service-key.Dockerfile
+    environment:
+      AUTH_SERVICE_URL: http://auth-service:8001
+      MASTER_KEY: ${MASTER_KEY:?Defina MASTER_KEY no .env}
+    volumes:
+      - service-key-data:/service-key
+    depends_on:
+      auth-service:
+        condition: service_started
+    restart: "no"
+
   evaluation-service:
     image: togglemaster/evaluation-service:local
     build:
@@ -128,15 +143,19 @@ services:
       REDIS_URL: redis://redis:6379
       FLAG_SERVICE_URL: http://flag-service:8002
       TARGETING_SERVICE_URL: http://targeting-service:8003
-      SERVICE_API_KEY: ${SERVICE_API_KEY:?Defina SERVICE_API_KEY no .env}
+      SERVICE_API_KEY_FILE: /service-key/evaluation-api-key
       AWS_REGION: us-east-1
       AWS_SQS_ENDPOINT: http://sqs:9324
       AWS_SQS_URL: http://sqs:9324/queue/togglemaster-events
       AWS_ACCESS_KEY_ID: local
       AWS_SECRET_ACCESS_KEY: local
+    volumes:
+      - service-key-data:/service-key:ro
     ports:
       - "127.0.0.1:8004:8004"
     depends_on:
+      service-key-init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       flag-service:
@@ -172,3 +191,4 @@ volumes:
   flag-db-data:
   sqs-data:
   dynamodb-data:
+  service-key-data:
