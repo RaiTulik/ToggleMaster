@@ -5,9 +5,12 @@ services:
       POSTGRES_DB: auth_db
       POSTGRES_USER: auth_user
       POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD:?Defina AUTH_DB_PASSWORD no .env}
+      AUTH_APP_USER: ${AUTH_APP_USER:?Defina AUTH_APP_USER no .env}
+      AUTH_APP_PASSWORD: ${AUTH_APP_PASSWORD:?Defina AUTH_APP_PASSWORD no .env}
     volumes:
       - auth-db-data:/var/lib/postgresql/data
       - ./auth-service/db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./scripts/configure-auth-access.sql:/docker-entrypoint-initdb.d/02-auth-access.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U auth_user -d auth_db"]
       interval: 5s
@@ -20,7 +23,7 @@ services:
       context: ./auth-service
     environment:
       PORT: "8001"
-      DATABASE_URL: postgres://auth_user:${AUTH_DB_PASSWORD:?Defina AUTH_DB_PASSWORD no .env}@auth-db:5432/auth_db?sslmode=disable
+      DATABASE_URL: postgres://${AUTH_APP_USER:?Defina AUTH_APP_USER no .env}:${AUTH_APP_PASSWORD:?Defina AUTH_APP_PASSWORD no .env}@auth-db:5432/auth_db?sslmode=disable
       MASTER_KEY: ${MASTER_KEY:?Defina MASTER_KEY no .env}
     ports:
       - "127.0.0.1:8001:8001"
@@ -30,12 +33,19 @@ services:
   flag-db:
     image: postgres:16-bookworm
     environment:
+      FLAG_APP_USER: ${FLAG_APP_USER:?Defina FLAG_APP_USER no .env}
+      FLAG_APP_PASSWORD: ${FLAG_APP_PASSWORD:?Defina FLAG_APP_PASSWORD no .env}
+      TARGETING_APP_USER: ${TARGETING_APP_USER:?Defina TARGETING_APP_USER no .env}
+      TARGETING_APP_PASSWORD: ${TARGETING_APP_PASSWORD:?Defina TARGETING_APP_PASSWORD no .env}
       POSTGRES_DB: flags_db
       POSTGRES_USER: flag_user
       POSTGRES_PASSWORD: ${FLAG_DB_PASSWORD:?Defina FLAG_DB_PASSWORD no .env}
     volumes:
       - flag-db-data:/var/lib/postgresql/data
       - ./flag-service/db/init.sql:/docker-entrypoint-initdb.d/01-flags.sql:ro
+      - ./scripts/init-targeting.sql:/docker-entrypoint-initdb.d/02-targeting.sql:ro
+      - ./targeting-service/db/init.sql:/opt/targeting/init.sql:ro
+      - ./scripts/configure-flag-targeting-access.sql:/docker-entrypoint-initdb.d/03-app-access.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U flag_user -d flags_db"]
       interval: 5s
@@ -48,10 +58,25 @@ services:
       context: ./flag-service
     environment:
       PORT: "8002"
-      DATABASE_URL: postgres://flag_user:${FLAG_DB_PASSWORD:?Defina FLAG_DB_PASSWORD no .env}@flag-db:5432/flags_db?sslmode=disable
+      DATABASE_URL: postgres://${FLAG_APP_USER:?Defina FLAG_APP_USER no .env}:${FLAG_APP_PASSWORD:?Defina FLAG_APP_PASSWORD no .env}@flag-db:5432/flags_db?sslmode=disable
       AUTH_SERVICE_URL: http://auth-service:8001
     ports:
       - "127.0.0.1:8002:8002"
+    depends_on:
+      flag-db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+  targeting-service:
+    image: togglemaster/targeting-service:local
+    build:
+      context: ./targeting-service
+    environment:
+      PORT: "8003"
+      DATABASE_URL: postgres://${TARGETING_APP_USER:?Defina TARGETING_APP_USER no .env}:${TARGETING_APP_PASSWORD:?Defina TARGETING_APP_PASSWORD no .env}@flag-db:5432/targeting_db?sslmode=disable
+      AUTH_SERVICE_URL: http://auth-service:8001
+    ports:
+      - "127.0.0.1:8003:8003"
     depends_on:
       flag-db:
         condition: service_healthy
