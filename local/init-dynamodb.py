@@ -1,0 +1,29 @@
+import boto3
+
+client = boto3.client(
+    "dynamodb",
+    endpoint_url="http://dynamodb:8000",
+    region_name="us-east-1",
+    aws_access_key_id="local",
+    aws_secret_access_key="local",
+)
+
+table_name = "ToggleMasterAnalytics"
+
+try:
+    client.create_table(
+        TableName=table_name,
+        KeySchema=[
+            {"AttributeName": "event_id", "KeyType": "HASH"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "event_id", "AttributeType": "S"},
+        ],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    print(f"Tabela {table_name} criada.")
+except client.exceptions.ResourceInUseException:
+    print(f"Tabela {table_name} ja existe.")
+
+client.get_waiter("table_exists").wait(TableName=table_name)
+print("Tabela pronta para uso.")

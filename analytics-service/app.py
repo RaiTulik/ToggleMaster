@@ -2,7 +2,6 @@ import os
 import sys
 import threading
 import json
-import uuid
 import time
 import logging
 import boto3
@@ -30,8 +29,14 @@ if not all([AWS_REGION, SQS_QUEUE_URL, DYNAMODB_TABLE_NAME]):
 # Criamos a sessão uma vez
 try:
     session = boto3.Session(region_name=AWS_REGION)
-    sqs_client = session.client("sqs")
-    dynamodb_client = session.client("dynamodb")
+    sqs_client = session.client(
+        "sqs",
+        endpoint_url=os.getenv("AWS_SQS_ENDPOINT") or None,
+    )
+    dynamodb_client = session.client(
+        "dynamodb",
+        endpoint_url=os.getenv("AWS_DYNAMODB_ENDPOINT") or None,
+    )
     log.info(f"Clientes Boto3 inicializados na região {AWS_REGION}")
 except NoCredentialsError:
     log.critical("Credenciais da AWS não encontradas. Verifique seu ambiente.")
@@ -49,8 +54,8 @@ def process_message(message):
         log.info(f"Processando mensagem ID: {message['MessageId']}")
         body = json.loads(message['Body'])
         
-        # Gera um ID único para o item no DynamoDB
-        event_id = str(uuid.uuid4())
+        # Mantem o mesmo identificador ao reprocessar a mensagem.
+        event_id = message["MessageId"]
         
         # Constrói o item no formato do DynamoDB
         item = {

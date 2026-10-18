@@ -100,6 +100,11 @@ services:
       FLAG_SERVICE_URL: http://flag-service:8002
       TARGETING_SERVICE_URL: http://targeting-service:8003
       SERVICE_API_KEY: ${SERVICE_API_KEY:?Defina SERVICE_API_KEY no .env}
+      AWS_REGION: us-east-1
+      AWS_SQS_ENDPOINT: http://sqs:9324
+      AWS_SQS_URL: http://sqs:9324/queue/togglemaster-events
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
     ports:
       - "127.0.0.1:8004:8004"
     depends_on:
@@ -109,6 +114,39 @@ services:
         condition: service_started
       targeting-service:
         condition: service_started
+      sqs:
+        condition: service_started
+
+  sqs:
+    image: softwaremill/elasticmq-native:1.6.12
+    volumes:
+      - ./local/elasticmq.conf:/opt/elasticmq.conf:ro
+
+  dynamodb:
+    image: amazon/dynamodb-local:latest
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
+
+  analytics-service:
+    image: togglemaster/analytics-service:local
+    build:
+      context: ./analytics-service
+    environment:
+      PORT: "8005"
+      AWS_REGION: us-east-1
+      AWS_SQS_URL: http://sqs:9324/queue/togglemaster-events
+      AWS_SQS_ENDPOINT: http://sqs:9324
+      AWS_DYNAMODB_TABLE: ToggleMasterAnalytics
+      AWS_DYNAMODB_ENDPOINT: http://dynamodb:8000
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+    ports:
+      - "127.0.0.1:8005:8005"
+    depends_on:
+      sqs:
+        condition: service_started
+      dynamodb:
+        condition: service_started
+
 volumes:
   auth-db-data:
   flag-db-data:

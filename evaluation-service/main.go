@@ -78,13 +78,22 @@ func main() {
 	}
 	log.Println("Conectado ao Redis com sucesso!")
 
-	// Cliente SQS (AWS SDK)
-	var sqsSvc *sqs.SQS
-	if sqsQueueURL != "" {
-		sess, err := session.NewSession(&aws.Config{Region: aws.String(awsRegion)})
+		// Cliente SQS (AWS SDK)
+	    var sqsSvc *sqs.SQS
+	    if sqsQueueURL != "" {
+		    awsConfig := &aws.Config{
+			   Region: aws.String(awsRegion),
+		}
+
+		if endpoint := os.Getenv("AWS_SQS_ENDPOINT"); endpoint != "" {
+			awsConfig.Endpoint = aws.String(endpoint)
+		}
+
+		sess, err := session.NewSession(awsConfig)
 		if err != nil {
 			log.Fatalf("Não foi possível criar sessão AWS: %v", err)
 		}
+
 		sqsSvc = sqs.New(sess)
 		log.Println("Cliente SQS inicializado com sucesso.")
 	}
