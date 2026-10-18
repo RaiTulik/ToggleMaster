@@ -30,16 +30,17 @@ services:
     depends_on:
       auth-db:
         condition: service_healthy
+
   flag-db:
     image: postgres:16-bookworm
     environment:
+      POSTGRES_DB: flags_db
+      POSTGRES_USER: flag_user
+      POSTGRES_PASSWORD: ${FLAG_DB_PASSWORD:?Defina FLAG_DB_PASSWORD no .env}
       FLAG_APP_USER: ${FLAG_APP_USER:?Defina FLAG_APP_USER no .env}
       FLAG_APP_PASSWORD: ${FLAG_APP_PASSWORD:?Defina FLAG_APP_PASSWORD no .env}
       TARGETING_APP_USER: ${TARGETING_APP_USER:?Defina TARGETING_APP_USER no .env}
       TARGETING_APP_PASSWORD: ${TARGETING_APP_PASSWORD:?Defina TARGETING_APP_PASSWORD no .env}
-      POSTGRES_DB: flags_db
-      POSTGRES_USER: flag_user
-      POSTGRES_PASSWORD: ${FLAG_DB_PASSWORD:?Defina FLAG_DB_PASSWORD no .env}
     volumes:
       - flag-db-data:/var/lib/postgresql/data
       - ./flag-service/db/init.sql:/docker-entrypoint-initdb.d/01-flags.sql:ro
@@ -67,6 +68,7 @@ services:
         condition: service_healthy
       auth-service:
         condition: service_started
+
   targeting-service:
     image: togglemaster/targeting-service:local
     build:
@@ -82,6 +84,7 @@ services:
         condition: service_healthy
       auth-service:
         condition: service_started
+
   redis:
     image: redis:7.4-bookworm
     healthcheck:
@@ -89,6 +92,32 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  sqs:
+    image: softwaremill/elasticmq-native:1.6.12
+    volumes:
+      - ./local/elasticmq.conf:/opt/elasticmq.conf:ro
+      - sqs-data:/data
+
+  dynamodb:
+    image: togglemaster/dynamodb-local:local
+    build:
+      context: ./local/dynamodb
+    command: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "/home/dynamodblocal/data"]
+    volumes:
+      - dynamodb-data:/home/dynamodblocal/data
+
+  dynamodb-init:
+    image: togglemaster/analytics-service:local
+    build:
+      context: ./analytics-service
+    entrypoint: ["python", "/local/init-dynamodb.py"]
+    volumes:
+      - ./local/init-dynamodb.py:/local/init-dynamodb.py:ro
+    depends_on:
+      dynamodb:
+        condition: service_started
+    restart: "no"
 
   evaluation-service:
     image: togglemaster/evaluation-service:local
@@ -117,26 +146,6 @@ services:
       sqs:
         condition: service_started
 
-  sqs:
-    image: softwaremill/elasticmq-native:1.6.12
-    volumes:
-      - ./local/elasticmq.conf:/opt/elasticmq.conf:ro
-
-  dynamodb:
-    image: amazon/dynamodb-local:latest
-    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
-  dynamodb-init:
-    image: togglemaster/analytics-service:local
-    build:
-      context: ./analytics-service
-    entrypoint: ["python", "/local/init-dynamodb.py"]
-    volumes:
-      - ./local/init-dynamodb.py:/local/init-dynamodb.py:ro
-    depends_on:
-      dynamodb:
-        condition: service_started
-    restart: "no"
-
   analytics-service:
     image: togglemaster/analytics-service:local
     build:
@@ -157,6 +166,9 @@ services:
         condition: service_started
       dynamodb-init:
         condition: service_completed_successfully
+
 volumes:
   auth-db-data:
   flag-db-data:
+  sqs-data:
+  dynamodb-data:
