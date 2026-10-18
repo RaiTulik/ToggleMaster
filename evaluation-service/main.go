@@ -51,6 +51,10 @@ func main() {
 		log.Fatal("TARGETING_SERVICE_URL deve ser definida")
 	}
 
+	if os.Getenv("SERVICE_API_KEY") == "" {
+		log.Fatal("SERVICE_API_KEY deve ser definida")
+	}
+
 	// SQS é opcional no dev local, mas obrigatório em prod
 	sqsQueueURL := os.Getenv("AWS_SQS_URL")
 	awsRegion := os.Getenv("AWS_REGION")

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/json"
@@ -9,6 +8,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 )
@@ -43,11 +43,13 @@ func (a *App) getCombinedFlagInfo(flagName string) (*CombinedFlagInfo, error) {
 			log.Printf("Cache HIT para flag '%s'", flagName)
 			return &info, nil
 		}
+
 		// Se o unmarshal falhar, trata como cache miss
 		log.Printf("Erro ao desserializar cache para flag '%s': %v", flagName, err)
 	}
-	
+
 	log.Printf("Cache MISS para flag '%s'", flagName)
+
 	// 2. Cache MISS - Buscar dos serviços
 	info, err := a.fetchFromServices(flagName)
 	if err != nil {
@@ -89,8 +91,14 @@ func (a *App) fetchFromServices(flagName string) (*CombinedFlagInfo, error) {
 	if flagErr != nil {
 		return nil, flagErr
 	}
+
 	if ruleErr != nil {
-		log.Printf("Aviso: Nenhuma regra de segmentação encontrada para '%s'. Usando padrão.", flagName)
+		if _, notFound := ruleErr.(*NotFoundError); !notFound {
+			return nil, fmt.Errorf("erro ao buscar regra de segmentação: %w", ruleErr)
+		}
+
+		log.Printf("Nenhuma regra de segmentação encontrada para '%s'. Usando padrão.", flagName)
+		ruleInfo = nil
 	}
 
 	return &CombinedFlagInfo{
@@ -99,14 +107,14 @@ func (a *App) fetchFromServices(flagName string) (*CombinedFlagInfo, error) {
 	}, nil
 }
 
-// fetchFlag (função helper)
+// fetchFlag busca a definição de uma flag
 func (a *App) fetchFlag(flagName string) (*Flag, error) {
 	url := fmt.Sprintf("%s/flags/%s", a.FlagServiceURL, flagName)
 
 	apiKey := os.Getenv("SERVICE_API_KEY")
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("Authorization", "Bearer "+apiKey)
-	
+
 	resp, err := a.HttpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao chamar flag-service: %w", err)
@@ -116,24 +124,29 @@ func (a *App) fetchFlag(flagName string) (*Flag, error) {
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, &NotFoundError{flagName}
 	}
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("flag-service retornou status %d", resp.StatusCode)
 	}
 
 	body, _ := ioutil.ReadAll(resp.Body)
+
 	var flag Flag
 	if err := json.Unmarshal(body, &flag); err != nil {
 		return nil, fmt.Errorf("erro ao desserializar resposta do flag-service: %w", err)
 	}
+
 	return &flag, nil
 }
 
+// fetchRule busca a regra de segmentação de uma flag
 func (a *App) fetchRule(flagName string) (*TargetingRule, error) {
 	url := fmt.Sprintf("%s/rules/%s", a.TargetingServiceURL, flagName)
-	apiKey := os.Getenv("SERVICE_API_KEY") // Usa a mesma chave
+
+	apiKey := os.Getenv("SERVICE_API_KEY")
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("Authorization", "Bearer "+apiKey)
-	
+
 	resp, err := a.HttpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao chamar targeting-service: %w", err)
@@ -141,17 +154,20 @@ func (a *App) fetchRule(flagName string) (*TargetingRule, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, &NotFoundError{flagName} // Não é um erro fatal
+		return nil, &NotFoundError{flagName}
 	}
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("targeting-service retornou status %d", resp.StatusCode)
 	}
 
 	body, _ := ioutil.ReadAll(resp.Body)
+
 	var rule TargetingRule
 	if err := json.Unmarshal(body, &rule); err != nil {
 		return nil, fmt.Errorf("erro ao desserializar resposta do targeting-service: %w", err)
 	}
+
 	return &rule, nil
 }
 
@@ -165,19 +181,19 @@ func (a *App) runEvaluationLogic(info *CombinedFlagInfo, userID string) bool {
 		return true
 	}
 
-	// 3. Processa a regra (só temos "PERCENTAGE" por enquanto)
+	// Processa a regra (só temos "PERCENTAGE" por enquanto)
 	rule := info.Rule.Rules
 	if rule.Type == "PERCENTAGE" {
-		// Converte o 'value' (que é interface{}) para float64
+		// Converte o value, que é interface{}, para float64
 		percentage, ok := rule.Value.(float64)
 		if !ok {
 			log.Printf("Erro: valor da regra de porcentagem não é um número para a flag '%s'", info.Flag.Name)
 			return false
 		}
-		
-		// Calcula o "bucket" do usuário (0-99)
+
+		// Calcula o bucket do usuário (0-99)
 		userBucket := getDeterministicBucket(userID + info.Flag.Name)
-		
+
 		if float64(userBucket) < percentage {
 			return true
 		}
@@ -187,14 +203,14 @@ func (a *App) runEvaluationLogic(info *CombinedFlagInfo, userID string) bool {
 }
 
 func getDeterministicBucket(input string) int {
-	// Usamos SHA1 (rápido) e pegamos os primeiros 4 bytes
+	// Usamos SHA1 e pegamos os primeiros 4 bytes
 	hasher := sha1.New()
 	hasher.Write([]byte(input))
 	hash := hasher.Sum(nil)
-	
+
 	// Converte 4 bytes para um uint32
 	val := binary.BigEndian.Uint32(hash[:4])
-	
+
 	// Retorna o módulo 100
 	return int(val % 100)
 }

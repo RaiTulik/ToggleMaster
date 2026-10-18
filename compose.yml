@@ -82,6 +82,33 @@ services:
         condition: service_healthy
       auth-service:
         condition: service_started
+  redis:
+    image: redis:7.4-bookworm
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  evaluation-service:
+    image: togglemaster/evaluation-service:local
+    build:
+      context: ./evaluation-service
+    environment:
+      PORT: "8004"
+      REDIS_URL: redis://redis:6379
+      FLAG_SERVICE_URL: http://flag-service:8002
+      TARGETING_SERVICE_URL: http://targeting-service:8003
+      SERVICE_API_KEY: ${SERVICE_API_KEY:?Defina SERVICE_API_KEY no .env}
+    ports:
+      - "127.0.0.1:8004:8004"
+    depends_on:
+      redis:
+        condition: service_healthy
+      flag-service:
+        condition: service_started
+      targeting-service:
+        condition: service_started
 volumes:
   auth-db-data:
   flag-db-data:
