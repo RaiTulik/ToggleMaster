@@ -27,6 +27,36 @@ services:
     depends_on:
       auth-db:
         condition: service_healthy
+  flag-db:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_DB: flags_db
+      POSTGRES_USER: flag_user
+      POSTGRES_PASSWORD: ${FLAG_DB_PASSWORD:?Defina FLAG_DB_PASSWORD no .env}
+    volumes:
+      - flag-db-data:/var/lib/postgresql/data
+      - ./flag-service/db/init.sql:/docker-entrypoint-initdb.d/01-flags.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flag_user -d flags_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
+  flag-service:
+    image: togglemaster/flag-service:local
+    build:
+      context: ./flag-service
+    environment:
+      PORT: "8002"
+      DATABASE_URL: postgres://flag_user:${FLAG_DB_PASSWORD:?Defina FLAG_DB_PASSWORD no .env}@flag-db:5432/flags_db?sslmode=disable
+      AUTH_SERVICE_URL: http://auth-service:8001
+    ports:
+      - "127.0.0.1:8002:8002"
+    depends_on:
+      flag-db:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
 volumes:
   auth-db-data:
+  flag-db-data:
