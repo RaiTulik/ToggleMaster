@@ -1,122 +1,208 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
+	"context"
+	"crypto/subtle"
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 )
 
-// Estrutura para o corpo da requisição de criação de chave
 type CreateKeyRequest struct {
 	Name string `json:"name"`
 }
 
-// Estrutura para a resposta da criação de chave
 type CreateKeyResponse struct {
 	Name    string `json:"name"`
-	Key     string `json:"key"` // A chave em texto plano é retornada APENAS uma vez
+	Key     string `json:"key"`
 	Message string `json:"message"`
 }
 
-// healthHandler é um simples endpoint de verificação de saúde
+func writeJSON(w http.ResponseWriter, status int, body interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		log.Printf("Erro ao escrever resposta HTTP: %v", err)
+	}
+}
+
+func bearerKey(r *http.Request) string {
+	parts := strings.Fields(r.Header.Get("Authorization"))
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return ""
+	}
+
+	return parts[1]
+}
+
+func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
+	if r.Method == method {
+		return true
+	}
+
+	w.Header().Set("Allow", method)
+	writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+		"error": "Metodo nao permitido",
+	})
+	return false
+}
+
 func (a *App) healthHandler(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// validateKeyHandler verifica se uma chave de API (enviada via Header) é válida
+func (a *App) readinessHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+
+	checkCtx, cancel := context.WithTimeout(r.Context(), time.Second)
+	defer cancel()
+
+	if err := a.DB.PingContext(checkCtx); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "not ready",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
 func (a *App) validateKeyHandler(w http.ResponseWriter, r *http.Request) {
-	// Extrai a chave do header "Authorization: Bearer <key>"
-	authHeader := r.Header.Get("Authorization")
-	keyString := strings.TrimPrefix(authHeader, "Bearer ")
-
-	if keyString == "" {
-		http.Error(w, "Authorization header não encontrado", http.StatusUnauthorized)
+	if !requireMethod(w, r, http.MethodGet) {
 		return
 	}
 
-	// Calcula o hash da chave recebida
-	keyHash := hashAPIKey(keyString)
+	key := bearerKey(r)
+	if key == "" {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "Authorization Bearer obrigatorio",
+		})
+		return
+	}
 
-	// Verifica se o hash existe no banco de dados
+	queryCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
 	var id int
-	err := a.DB.QueryRow("SELECT id FROM api_keys WHERE key_hash = $1 AND is_active = true", keyHash).Scan(&id)
-	if err != nil {
-		// Se não encontrar (sql.ErrNoRows), ou qualquer outro erro, a chave é inválida
-		log.Printf("Falha na validação da chave (hash: %s...): %v", keyHash[:6], err)
-		http.Error(w, "Chave de API inválida ou inativa", http.StatusUnauthorized)
+	err := a.DB.QueryRowContext(
+		queryCtx,
+		"SELECT id FROM api_keys WHERE key_hash = $1 AND is_active = true",
+		hashAPIKey(key),
+	).Scan(&id)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error": "Chave de API invalida ou inativa",
+		})
 		return
 	}
-
-	// Chave válida
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"message": "Chave válida"})
-}
-
-// createKeyHandler cria uma nova chave de API
-func (a *App) createKeyHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Método não permitido", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req CreateKeyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Corpo da requisição inválido", http.StatusBadRequest)
-		return
-	}
-
-	if req.Name == "" {
-		http.Error(w, "O campo 'name' é obrigatório", http.StatusBadRequest)
-		return
-	}
-
-	// Gera uma nova chave e seu hash
-	newKey, err := generateAPIKey()
-	if err != nil {
-		http.Error(w, "Erro ao gerar a chave", http.StatusInternalServerError)
-		return
-	}
-	newKeyHash := hashAPIKey(newKey)
-
-	// Salva o hash no banco de dados
-	var newID int
-	err = a.DB.QueryRow(
-		"INSERT INTO api_keys (name, key_hash) VALUES ($1, $2) RETURNING id",
-		req.Name, newKeyHash,
-	).Scan(&newID)
 
 	if err != nil {
-		log.Printf("Erro ao salvar a chave no banco: %v", err)
-		http.Error(w, "Erro ao salvar a chave", http.StatusInternalServerError)
+		log.Printf("Erro no banco durante validacao da chave: %v", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "Servico de autenticacao temporariamente indisponivel",
+		})
 		return
 	}
 
-	log.Printf("Nova chave criada com sucesso (ID: %d, Name: %s)", newID, req.Name)
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(CreateKeyResponse{
-		Name:    req.Name,
-		Key:     newKey, // Retorna a chave em texto plano pela última vez
-		Message: "Guarde esta chave com segurança! Você não poderá vê-la novamente.",
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message": "Chave valida",
 	})
 }
 
-// --- Middleware ---
+func (a *App) createKeyHandler(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodPost) {
+		return
+	}
 
-// masterKeyAuthMiddleware protege endpoints que só podem ser acessados com a MASTER_KEY
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	decoder := json.NewDecoder(r.Body)
+
+	var req CreateKeyRequest
+	if err := decoder.Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "Corpo da requisicao invalido ou muito grande",
+		})
+		return
+	}
+
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "Envie apenas um objeto JSON",
+		})
+		return
+	}
+
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "O campo name e obrigatorio",
+		})
+		return
+	}
+
+	newKey, err := generateAPIKey()
+	if err != nil {
+		log.Printf("Erro ao gerar chave: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"error": "Erro ao gerar chave",
+		})
+		return
+	}
+
+	queryCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	var newID int
+	err = a.DB.QueryRowContext(
+		queryCtx,
+		"INSERT INTO api_keys (name, key_hash) VALUES ($1, $2) RETURNING id",
+		req.Name,
+		hashAPIKey(newKey),
+	).Scan(&newID)
+
+	if err != nil {
+		log.Printf("Erro no banco durante criacao de chave: %v", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "Nao foi possivel confirmar a criacao da chave",
+		})
+		return
+	}
+
+	log.Printf("Nova chave criada com sucesso: ID=%d", newID)
+	writeJSON(w, http.StatusCreated, CreateKeyResponse{
+		Name:    req.Name,
+		Key:     newKey,
+		Message: "Guarde esta chave; ela nao sera exibida novamente.",
+	})
+}
+
 func (a *App) masterKeyAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		keyString := strings.TrimPrefix(authHeader, "Bearer ")
+		key := bearerKey(r)
 
-		if keyString != a.MasterKey {
-			http.Error(w, "Acesso não autorizado", http.StatusForbidden)
+		if key == "" ||
+			subtle.ConstantTimeCompare([]byte(key), []byte(a.MasterKey)) != 1 {
+			writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": "Acesso nao autorizado",
+			})
 			return
 		}
-		// Se a chave for válida, continua para o handler principal
+
 		next.ServeHTTP(w, r)
 	})
 }

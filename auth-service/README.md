@@ -1,91 +1,79 @@
-# auth-service (Go)
+# Auth Service
 
-Este é o serviço de autenticação do projeto ToggleMaster. Ele é responsável por criar e validar chaves de API.
+Serviço Go responsável pela criação e validação das chaves de API do ToggleMaster.
 
-## 📦 Pré-requisitos (Local)
+## Execução local
 
-* [Go](https://go.dev/doc/install) (versão 1.21 ou superior)
-* [PostgreSQL](https://www.postgresql.org/download/) (rodando localmente ou em um contêiner Docker)
+Use o Docker Compose na raiz do repositório, conforme o
+[guia principal](../README.md).
 
-## 🚀 Rodando Localmente
+O serviço utiliza a porta local `8001` e depende do PostgreSQL `auth-db`.
+A preparação do banco e das permissões ocorre automaticamente na primeira
+inicialização de um volume vazio.
 
-1.  **Clone o repositório** e entre na pasta `auth-service`.
+## Configuração
 
-2.  **Prepare o Banco de Dados:**
-    * Crie um banco de dados no seu PostgreSQL (ex: `auth_db`).
-    * Execute o script `db/init.sql` para criar a tabela `api_keys`:
-        ```bash
-        psql -U seu_usuario -d auth_db -f db/init.sql
-        ```
+| Variável | Finalidade |
+|---|---|
+| PORT | Porta HTTP; padrão 8001 |
+| DATABASE_URL | Conexão com o banco de autenticação |
+| MASTER_KEY | Credencial administrativa para criar chaves de API |
 
-3.  **Configure as Variáveis de Ambiente:**
-    Crie um arquivo chamado `.env` na raiz desta pasta (`auth-service/`) com o seguinte conteúdo:
-    ```.env
-    # String de conexão do seu banco de dados PostgreSQL
-    DATABASE_URL="postgres://SEU_USUARIO:SUA_SENHA@localhost:5432/auth_db"
-    
-    # Porta que o serviço irá rodar
-    PORT="8001"
-    
-    # Chave mestra para criar novas chaves de API
-    MASTER_KEY="admin-secreto-123"
-    ```
+No Compose, a aplicação acessa o banco `auth_db` com o usuário `auth_app`.
+O usuário administrativo do PostgreSQL é reservado à preparação do banco.
 
-4.  **Instale as Dependências:**
-    ```bash
-    go mod tidy
-    ```
+As credenciais de exemplo são exclusivas para desenvolvimento local.
 
-5.  **Inicie o Serviço:**
-    ```bash
-    go run .
-    ```
-    O servidor estará rodando em `http://localhost:8001`.
+## Endpoints
 
-## 🧪 Testando os Endpoints
+| Método | Rota | Autenticação | Finalidade |
+|---|---|---|---|
+| GET | `/health` | Não exige | Verificar resposta do processo HTTP |
+| GET | `/ready` | Não exige | Verificar conexão com o banco |
+| POST | `/admin/keys` | Bearer com a MASTER_KEY | Criar uma chave de API |
+| GET | `/validate` | Bearer com uma chave de API | Validar a chave |
 
-Você pode usar `curl` ou Postman.
-
-**1. Verifique a Saúde (Health Check):**
-```bash
-curl http://localhost:8001/health
-```
-
-Saída esperada: `{"status":"ok"}`
-
-**2. Crie uma nova Chave de API (requer a MASTER_KEY):**
-
-```bash
-curl -X POST http://localhost:8001/admin/keys \
--H "Content-Type: application/json" \
--H "Authorization: Bearer admin-secreto-123" \
--d '{"name": "meu-primeiro-servico"}'
-``` 
-
-Saída esperada (A SUA CHAVE SERÁ DIFERENTE):
+Corpo para criação de uma chave:
 
 ```json
-{
-  "name": "meu-primeiro-servico",
-  "key": "tm_key_a1b2c3d4...",
-  "message": "Guarde esta chave com segurança! Você não poderá vê-la novamente."
-}
+{"name":"minha-aplicacao"}
 ```
 
-**3. Valide a Chave que você acabou de criar: (Substitua tm_key_... pela chave exata que você recebeu no passo anterior)**
+A resposta de criação apresenta a chave em texto uma única vez.
+O banco armazena seu hash.
 
-```bash
-curl http://localhost:8001/validate \
--H "Authorization: Bearer tm_key_a1b2c3d4..."
+O endpoint `/validate` aceita somente chaves existentes e ativas.
+
+## Respostas e falhas
+
+| Situação | HTTP |
+|---|---|
+| Chave criada | 201 |
+| Chave de API válida | 200 |
+| Chave de API ausente, inválida ou inativa | 401 |
+| MASTER_KEY ausente ou incorreta | 403 |
+| Corpo inválido na criação | 400 |
+| Método não permitido | 405 |
+| Falha no banco durante validação ou criação | 503 |
+| Banco indisponível no `/ready` | 503 |
+
+As consultas de validação e criação possuem prazo de dois segundos.
+A verificação do `/ready` possui prazo de um segundo.
+
+Um erro de banco não é interpretado como chave inválida.
+Se uma criação falhar por perda de conexão ou timeout, a resposta não
+confirma se a gravação chegou a ser concluída.
+
+## Operação
+
+O servidor trata SIGTERM e permite até cinco segundos para concluir
+as requisições HTTP em andamento antes de fechar suas conexões.
+
+Para consultar os logs, execute na raiz do repositório:
+
+```powershell
+docker compose logs --tail 30 auth-service
 ```
 
-Saída esperada: `{"message":"Chave válida"}`
-
-**4. Teste uma Chave Inválida:**
-
-```bash
-curl http://localhost:8001/validate \
--H "Authorization: Bearer chave-errada-123"
-```
-
-Saída esperada: `Chave de API inválida ou inativa`
+O roteiro de instalação e os testes integrados estão no
+[README principal](../README.md).
