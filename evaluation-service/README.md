@@ -1,103 +1,187 @@
-# evaluation-service (Go)
+# Evaluation Service
 
-Este é o serviço de avaliação, o "caminho quente" (hot path) do projeto ToggleMaster. É o único endpoint que os clientes finais (ex: seu app mobile, seu site) devem chamar.
+Serviço Go responsável por avaliar feature flags para um usuário.
+Consulta definições e regras, utiliza cache Redis e publica eventos
+de avaliação no SQS.
 
-Ele é otimizado para alta velocidade e baixa latência usando **cache em Redis**.
+## Execução local
 
-Ele funciona da seguinte forma:
-1.  Recebe uma requisição (`/evaluate?user_id=...&flag_name=...`).
-2.  Busca as regras da flag no **Redis**.
-3.  **Se não estiver no cache (Cache MISS):**
-    * Busca a definição da flag no `flag-service`.
-    * Busca a regra no `targeting-service`.
-    * Salva o resultado no Redis com um TTL (Time-To-Live) curto.
-4.  Executa a lógica de avaliação (ex: "o usuário está nos 50%?").
-5.  Retorna `true` ou `false` para o cliente.
-6.  Envia *assincronamente* um evento da decisão para uma fila **AWS SQS**.
+Use o Docker Compose na raiz do repositório, conforme o
+[guia principal](../README.md).
 
-## 📦 Pré-requisitos (Local)
+O serviço utiliza a porta local `8004`.
 
-* [Go](https://go.dev/doc/install) (versão 1.21 ou superior)
-* [Redis](https://redis.io/docs/getting-started/installation/) (rodando localmente ou em Docker)
-* Os serviços `auth-service`, `flag-service` e `targeting-service` devem estar rodando.
-* **Credenciais da AWS:** Para o SQS funcionar, seu terminal deve estar autenticado na AWS (ex: via `aws configure` ou variáveis de ambiente).
+No ambiente local, o ElasticMQ substitui o Amazon SQS.
+Não são necessários recursos ou credenciais reais da AWS.
 
-## 🚀 Rodando Localmente
+## Fluxo de avaliação
 
-1.  **Clone o repositório** e entre na pasta `evaluation-service`.
+1. Recebe `user_id` e `flag_name`.
+2. Consulta as informações da flag no Redis.
+3. Em caso de cache MISS, consulta flag-service e targeting-service
+   em paralelo.
+4. Avalia a definição e a regra para o usuário informado.
+5. Coloca um evento na fila interna de publicação.
+6. Retorna o resultado e o identificador do evento.
 
-2.  **Crie uma Chave de API de Serviço:**
-    Este serviço precisa se autenticar no `flag-service` e no `targeting-service`. Você deve criar uma chave de API para ele usando o `auth-service` (com a `MASTER_KEY`).
-    ```bash
-    curl -X POST http://localhost:8001/admin/keys \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer admin-secreto-123" \
-    -d '{"name": "evaluation-service-key"}'
-    ```
-    Guarde a chave `key` retornada (ex: `tm_key_...`). Vamos chamá-la de `SUA_CHAVE_DE_SERVICO`.
+Os enviadores publicam os eventos no SQS de forma assíncrona.
+O analytics consome esses eventos e os grava no DynamoDB.
 
-3.  **Configure as Variáveis de Ambiente:**
-    Crie um arquivo chamado `.env` na raiz desta pasta com o seguinte conteúdo:
-    ```.env
-    # Porta que este serviço irá rodar
-    PORT="8004"
-    
-    # URL do seu Redis local
-    REDIS_URL="redis://localhost:6379"
-    
-    # URLs dos outros serviços
-    FLAG_SERVICE_URL="http://localhost:8002"
-    TARGETING_SERVICE_URL="http://localhost:8003"
-    
-    # Chave de API que você criou no passo 2
-    SERVICE_API_KEY="SUA_CHAVE_DE_SERVICO"
-    
-    # --- Configuração da AWS (Obrigatório para o desafio) ---
-    # Cole a URL da fila SQS que você criou no console da AWS
-    AWS_SQS_URL="[https://sqs.us-east-1.amazonaws.com/123456789012/sua-fila](https://sqs.us-east-1.amazonaws.com/123456789012/sua-fila)"
-    
-    # Região da sua fila SQS
-    AWS_REGION="us-east-1" 
-    ```
+## Configuração
 
-4.  **Instale as Dependências:**
-    ```bash
-    go mod tidy
-    ```
+| Variável | Finalidade |
+|---|---|
+| PORT | Porta HTTP; padrão 8004 |
+| REDIS_URL | Endereço do Redis |
+| FLAG_SERVICE_URL | Endereço do serviço de flags |
+| TARGETING_SERVICE_URL | Endereço do serviço de targeting |
+| SERVICE_API_KEY_FILE | Arquivo com a chave de API do evaluation |
+| SERVICE_API_KEY | Alternativa para fornecer a chave por variável |
+| AWS_REGION | Região utilizada pelo cliente SQS |
+| AWS_SQS_URL | URL da fila de eventos |
+| AWS_SQS_ENDPOINT | Endpoint alternativo; utilizado pelo ElasticMQ |
 
-5.  **Inicie o Serviço:**
-    ```bash
-    go run .
-    ```
-    O servidor estará rodando em `http://localhost:8004`.
+Quando `SERVICE_API_KEY_FILE` está definido, a chave é lida desse arquivo.
+Caso contrário, utiliza-se `SERVICE_API_KEY`.
 
-## 🧪 Testando os Endpoints
+No Compose, o inicializador `service-key-init` prepara a chave
+automaticamente. Ela fica em um volume compartilhado, montado como
+somente leitura no evaluation.
 
-Para os testes, vamos assumir que você já criou:
-1.  Uma flag chamada `enable-new-dashboard` no `flag-service`.
-2.  Uma regra para `enable-new-dashboard` no `targeting-service` do tipo `PERCENTAGE` com valor `50`.
+O serviço não recebe a MASTER_KEY nem credenciais dos bancos PostgreSQL.
 
-**1. Verifique a Saúde (Health Check):**
-```bash
-curl http://localhost:8004/health
+As credenciais AWS fictícias do Compose atendem exclusivamente aos
+emuladores locais. Na cloud, a autenticação deverá utilizar o mecanismo
+definido para o ambiente de implantação.
+
+Sem `AWS_SQS_URL`, o publicador fica desabilitado e as avaliações são
+registradas nos logs. O Compose configura a fila, portanto a publicação
+está habilitada na execução integrada local.
+
+## Endpoints
+
+| Método | Rota | Finalidade |
+|---|---|---|
+| GET | `/health` | Verificar resposta do processo HTTP |
+| GET | `/ready` | Verificar condições locais de prontidão |
+| GET | `/evaluate` | Avaliar uma flag para um usuário |
+
+O endpoint de avaliação não exige chave de API do cliente.
+O evaluation utiliza sua própria chave para consultar flag e targeting.
+
+Exemplo:
+
+```text
+GET /evaluate?user_id=usuario-123&flag_name=enable-new-dashboard
 ```
-Saída esperada: `{"status":"ok"}``
 
-**2. Teste a Avaliação:** Tente alguns IDs de usuário diferentes. O hash determinístico fará com que alguns caiam dentro dos 50% e outros fora.
+Resposta de exemplo com publicação habilitada:
 
-```bash
-# Teste User 1
-curl "http://localhost:8004/evaluate?user_id=user-123&flag_name=enable-new-dashboard"
+```json
+{
+  "flag_name": "enable-new-dashboard",
+  "user_id": "usuario-123",
+  "result": true,
+  "event_id": "65caa538be12cee1f9ed370a67b81524"
+}
 ```
-Saída (exemplo): `{"flag_name":"enable-new-dashboard","user_id":"user-123","result":true}`
 
-```bash
-# Teste User 2
-curl "http://localhost:8004/evaluate?user_id=user-abc&flag_name=enable-new-dashboard"
+O `event_id` é gerado para cada requisição.
+Repetir a chamada HTTP cria uma nova avaliação e um novo evento.
+
+Com a publicação desabilitada, o campo `event_id` é omitido.
+
+## Respostas e falhas
+
+| Situação | HTTP |
+|---|---|
+| Avaliação concluída e evento aceito na fila interna, quando habilitada | 200 |
+| Parâmetros ausentes ou acima do tamanho permitido | 400 |
+| Método não permitido | 405 |
+| Falha ao preparar o identificador do evento | 500 |
+| Falha ao consultar os serviços necessários à avaliação | 502 |
+| Serviço encerrando ou fila interna indisponível | 503 |
+
+O limite de `user_id` é de 256 bytes.
+O limite de `flag_name` é de 100 bytes.
+
+Uma flag inexistente produz resultado `false`.
+Uma regra inexistente permite usar o comportamento padrão da flag.
+Falhas de comunicação com targeting são retornadas como erro,
+em vez de serem interpretadas como ausência de regra.
+
+## Cache
+
+O Redis armazena as informações combinadas da definição e da regra,
+com TTL de 30 segundos.
+
+Requisições consecutivas podem apresentar `Cache MISS` e depois
+`Cache HIT` nos logs.
+
+Alterações feitas em flag ou targeting podem levar até o vencimento
+do cache existente para aparecer nas avaliações.
+
+O cache evita consultas aos serviços de origem; cada avaliação ainda
+gera seu próprio evento quando a publicação está habilitada.
+
+## Publicação de eventos
+
+O publicador possui uma fila interna com capacidade para 256 eventos
+aguardando processamento e quatro enviadores concorrentes.
+
+O corpo publicado contém:
+- `event_id`.
+- `user_id`.
+- `flag_name`.
+- `result`, como booleano.
+- `timestamp`, com fuso horário.
+
+As tentativas de envio do mesmo evento preservam seu identificador.
+
+A resposta HTTP de sucesso não garante que o SQS já recebeu o evento.
+Ela confirma a aceitação na fila interna do processo.
+
+Essa fila é mantida em memória. Uma interrupção abrupta ou uma falha
+definitiva de envio pode causar perda de eventos.
+Não há outbox persistente nem garantia de entrega exatamente uma vez.
+
+Falhas de publicação são registradas nos logs.
+
+## Saúde e prontidão
+
+O `/health` verifica a resposta do processo HTTP.
+
+O `/ready` verifica:
+- Se o serviço está encerrando.
+- Se o Redis responde.
+- Se o publicador, quando habilitado, aceita novos eventos.
+
+O `/ready` não comprova conectividade com SQS, flag-service ou
+targeting-service, nem garante a entrega de eventos.
+
+## Encerramento e chave de serviço
+
+Ao receber SIGTERM, o serviço interrompe a aceitação de novas conexões,
+permite até dez segundos para concluir as requisições HTTP e até
+30 segundos para finalizar as tentativas pendentes do publicador.
+
+O Compose permite 50 segundos antes de forçar o encerramento.
+
+A chave de API é carregada na inicialização.
+Depois de revogá-la, prepare uma nova chave e reinicie o evaluation:
+
+```powershell
+docker compose run --rm service-key-init
+docker compose restart evaluation-service
 ```
-Saída (exemplo): `{"flag_name":"enable-new-dashboard","user_id":"user-abc","result":false}`
 
-**3. Verifique o Cache:** Execute o mesmo comando duas vezes seguidas. Na segunda vez, você verá um log "Cache HIT" no terminal do `evaluation-service`.
+## Operação
 
-**4. Verifique a Fila SQS:** Após fazer as chamadas acima, vá até o console da AWS, abra sua fila SQS e verifique se as mensagens (`EvaluationEvent`) estão chegando.
+Execute na raiz do repositório:
 
+```powershell
+docker compose logs --tail 30 evaluation-service
+```
+
+O roteiro completo de criação de uma flag, regra e consulta do evento
+no DynamoDB está no [README principal](../README.md).

@@ -1,93 +1,127 @@
-# targeting-service (Python)
+# Targeting Service
 
-Este é o serviço de regras de segmentação (targeting) do projeto ToggleMaster. Ele é responsável por gerenciar regras complexas (ex: "50% dos usuários", "usuários do país X") para uma feature flag específica.
+Serviço Python responsável por criar, consultar, atualizar e remover
+as regras de segmentação associadas às feature flags.
 
-**IMPORTANTE:** Este serviço também é protegido e depende que o `auth-service` esteja rodando (ex: em `http://localhost:8001`).
+## Execução local
 
-## 📦 Pré-requisitos (Local)
+Use o Docker Compose na raiz do repositório, conforme o
+[guia principal](../README.md).
 
-* [Python](https://www.python.org/) (versão 3.9 ou superior)
-* [PostgreSQL](https://www.postgresql.org/download/)
-* O `auth-service` deve estar rodando.
+O serviço utiliza a porta local `8003`, depende do auth para validar
+chaves de API e armazena as regras no PostgreSQL.
 
-## 🚀 Rodando Localmente
+## Configuração
 
-1.  **Clone o repositório** e entre na pasta `targeting-service`.
+| Variável | Finalidade |
+|---|---|
+| PORT | Porta HTTP; padrão 8003 |
+| DATABASE_URL | Conexão com o banco de targeting |
+| AUTH_SERVICE_URL | Endereço do serviço de autenticação |
 
-2.  **Prepare o Banco de Dados:**
-    * Crie um banco de dados no seu PostgreSQL (ex: `targeting_db`).
-    * Execute o script `db/init.sql` para criar a tabela `targeting_rules`:
-        ```bash
-        psql -U seu_usuario -d targeting_db -f db/init.sql
-        ```
+No Compose, a aplicação utiliza o banco `targeting_db` com o usuário
+`targeting_app`. Esse usuário não possui permissão de conexão ao banco
+`flags_db`.
 
-3.  **Configure as Variáveis de Ambiente:**
-    Crie um arquivo chamado `.env` na raiz desta pasta (`targeting-service/`) com o seguinte conteúdo:
-    ```.env
-    # String de conexão do seu banco de dados PostgreSQL
-    DATABASE_URL="postgres://SEU_USUARIO:SUA_SENHA@localhost:5432/targeting_db"
-    
-    # Porta que este serviço (targeting-service) irá rodar
-    PORT="8003"
-    
-    # URL do auth-service (que deve estar rodando na porta 8001)
-    AUTH_SERVICE_URL="http://localhost:8001"
-    ```
+Os dois bancos compartilham o container PostgreSQL `flag-db`,
+mas possuem usuários e permissões separados.
 
-4.  **Instale as Dependências:**
-    ```bash
-    pip install -r requirements.txt
-    ```
+## Endpoints
 
-5.  **Inicie o Serviço:**
-    ```bash
-    gunicorn --bind 0.0.0.0:8003 app:app
-    ```
-    O servidor estará rodando em `http://localhost:8003`.
+Todas as rotas de regras exigem o header:
 
-## 🧪 Testando os Endpoints
-
-Lembre-se de obter sua `SUA_CHAVE_API` no `auth-service` (veja o README do `flag-service`).
-
-**1. Verifique a Saúde (Health Check):**
-```bash
-curl http://localhost:8003/health
+```text
+Authorization: Bearer <chave-de-api>
 ```
-Saída esperada: `{"status":"ok"}`
 
-**2. Crie uma nova Regra de Segmentação:** Vamos criar uma regra para a flag enable-new-dashboard (que você criou no flag-service). Esta regra fará a flag aparecer para 50% dos usuários.
-```bash
-curl -X POST http://localhost:8003/rules \
--H "Content-Type: application/json" \
--H "Authorization: Bearer SUA_CHAVE_API" \
--d '{
-    "flag_name": "enable-new-dashboard",
-    "is_enabled": true,
-    "rules": {
-        "type": "PERCENTAGE",
-        "value": 50
-    }
-}'
-```
-Saída esperada: (Um JSON com os dados da regra criada).
+A chave deve ser criada no auth com a MASTER_KEY.
+A MASTER_KEY não é utilizada diretamente nas rotas de regras.
 
-**3. Busque a Regra que você criou:**
-```bash
-curl http://localhost:8003/rules/enable-new-dashboard \
--H "Authorization: Bearer SUA_CHAVE_API"
-```
-Saída esperada: (O JSON da regra que você acabou de criar).
+| Método | Rota | Finalidade |
+|---|---|---|
+| GET | `/health` | Verificar resposta do processo HTTP; não exige chave |
+| POST | `/rules` | Criar uma regra para uma flag |
+| GET | `/rules/<flag_name>` | Consultar a regra |
+| PUT | `/rules/<flag_name>` | Atualizar a regra ou seu estado |
+| DELETE | `/rules/<flag_name>` | Remover a regra |
 
-**4. Atualize a Regra (mude para 75%):**
-```bash
-curl -X PUT http://localhost:8003/rules/enable-new-dashboard \
--H "Content-Type: application/json" \
--H "Authorization: Bearer SUA_CHAVE_API" \
--d '{
-    "rules": {
-        "type": "PERCENTAGE",
-        "value": 75
-    }
-}'
+Corpo de criação de uma regra percentual:
+
+```json
+{
+  "flag_name": "enable-new-dashboard",
+  "is_enabled": true,
+  "rules": {
+    "type": "PERCENTAGE",
+    "value": 50
+  }
+}
 ```
-Saída esperada: (O JSON da regra atualizada, com `"value": 75`).
+
+Os campos `flag_name` e `rules` são obrigatórios.
+Quando omitido, `is_enabled` recebe `true`.
+
+Corpo de atualização:
+
+```json
+{
+  "rules": {
+    "type": "PERCENTAGE",
+    "value": 100
+  }
+}
+```
+
+A atualização exige pelo menos um dos campos `rules` ou `is_enabled`.
+Quando informado, `rules` substitui o objeto anterior por completo.
+O campo `flag_name` não é alterado pelo PUT.
+
+O serviço armazena as regras em JSON. A interpretação das regras
+é responsabilidade do evaluation.
+
+O cadastro de uma regra não verifica se a flag correspondente existe
+no flag-service. Para o teste integrado, cadastre ambos usando o mesmo nome.
+
+## Respostas e falhas
+
+| Situação | HTTP |
+|---|---|
+| Regra criada | 201 |
+| Consulta ou atualização concluída | 200 |
+| Regra removida | 204 |
+| Campos obrigatórios ausentes | 400 |
+| Chave ausente, inválida ou inativa | 401 |
+| Regra não encontrada | 404 |
+| Regra duplicada para a mesma flag | 409 |
+| Auth indisponível | 503 |
+| Timeout ao consultar o auth | 504 |
+| Erro interno na operação com o banco de targeting | 500 |
+
+O middleware consulta o auth com timeout de três segundos.
+Uma falha do auth não é interpretada como chave inválida.
+
+## Saúde e cache
+
+O `/health` verifica somente a resposta do processo HTTP.
+Este serviço ainda não possui endpoint `/ready`.
+
+Alterações nas regras não invalidam imediatamente o cache do evaluation.
+Dados já armazenados podem continuar sendo utilizados até o TTL de
+30 segundos expirar.
+
+O evaluation distingue uma regra inexistente de uma falha ao consultar
+o targeting. A indisponibilidade do serviço não é tratada como ausência
+de regra.
+
+## Operação
+
+A imagem executa a aplicação com Gunicorn.
+
+Para consultar os logs, execute na raiz do repositório:
+
+```powershell
+docker compose logs --tail 30 targeting-service
+```
+
+O roteiro de criação de uma regra e avaliação de uma flag está no
+[README principal](../README.md).

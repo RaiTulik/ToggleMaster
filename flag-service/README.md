@@ -1,106 +1,109 @@
-# flag-service (Python)
+# Flag Service
 
-Este é o serviço de CRUD (Create, Read, Update, Delete) do projeto ToggleMaster. Ele é responsável por gerenciar as *definições* das feature flags.
+Serviço Python responsável por criar, consultar, atualizar e remover
+as definições de feature flags.
 
-**IMPORTANTE:** Este serviço é protegido e depende que o `auth-service` esteja rodando. Todas as requisições (exceto `/health`) exigem um header `Authorization: Bearer <sua-chave-api>`.
+## Execução local
 
-## 📦 Pré-requisitos (Local)
+Use o Docker Compose na raiz do repositório, conforme o
+[guia principal](../README.md).
 
-* [Python](https://www.python.org/) (versão 3.9 ou superior)
-* [PostgreSQL](https://www.postgresql.org/download/) (rodando localmente ou em um contêiner Docker)
-* O `auth-service` deve estar rodando (localmente na porta `8001`).
+O serviço utiliza a porta local `8002`, depende do auth para validar
+chaves de API e armazena suas definições no PostgreSQL.
 
-## 🚀 Rodando Localmente
+## Configuração
 
-1.  **Clone o repositório** e entre na pasta `flag-service`.
+| Variável | Finalidade |
+|---|---|
+| PORT | Porta HTTP; padrão 8002 |
+| DATABASE_URL | Conexão com o banco de flags |
+| AUTH_SERVICE_URL | Endereço do serviço de autenticação |
 
-2.  **Prepare o Banco de Dados:**
-    * Crie um banco de dados no seu PostgreSQL (ex: `flags_db`).
-    * Execute o script `db/init.sql` para criar a tabela `flags`:
-        ```bash
-        psql -U seu_usuario -d flags_db -f db/init.sql
-        ```
+No Compose, a aplicação utiliza o banco `flags_db` com o usuário `flag_app`.
+Esse usuário não possui permissão de conexão ao banco `targeting_db`.
 
-3.  **Configure as Variáveis de Ambiente:**
-    Crie um arquivo chamado `.env` na raiz desta pasta (`flag-service/`) com o seguinte conteúdo:
-    ```.env
-    # String de conexão do seu banco de dados PostgreSQL
-    DATABASE_URL="postgres://SEU_USUARIO:SUA_SENHA@localhost:5432/flags_db"
-    
-    # Porta que este serviço (flag-service) irá rodar
-    PORT="8002"
-    
-    # URL do auth-service (que deve estar rodando na porta 8001)
-    AUTH_SERVICE_URL="http://localhost:8001"
-    ```
+## Endpoints
 
-4.  **Instale as Dependências:**
-    ```bash
-    pip install -r requirements.txt
-    ```
+Todas as rotas de flags exigem o header:
 
-5.  **Inicie o Serviço:**
-    ```bash
-    gunicorn --bind 0.0.0.0:8002 app:app
-    ```
-    O servidor estará rodando em `http://localhost:8002`.
-
-## 🧪 Testando os Endpoints
-
-**Primeiro, você precisa de uma chave de API válida!**
-
-1.  Vá até o terminal do `auth-service` (que deve estar rodando) e crie uma chave:
-    ```bash
-    curl -X POST http://localhost:8001/admin/keys \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer admin-secreto-123" \
-    -d '{"name": "admin-para-flag-service"}'
-    ```
-2.  Copie a chave retornada (ex: `tm_key_...`). Vamos chamá-la de `SUA_CHAVE_API` no resto dos exemplos.
-
----
-
-**Agora, teste o `flag-service`:**
-
-**1. Verifique a Saúde (Health Check):**
-```bash
-curl http://localhost:8002/health
+```text
+Authorization: Bearer <chave-de-api>
 ```
 
-Saída esperada: `{"status":"ok"}`
+A chave deve ser criada no auth com a MASTER_KEY.
+A MASTER_KEY não é utilizada diretamente nas rotas de flags.
 
-**2. Tente Acessar um Endpoint Protegido (Sem Chave):**
-```bash
-curl http://localhost:8002/flags
+| Método | Rota | Finalidade |
+|---|---|---|
+| GET | `/health` | Verificar resposta do processo HTTP; não exige chave |
+| POST | `/flags` | Criar uma flag |
+| GET | `/flags` | Listar as flags |
+| GET | `/flags/<name>` | Consultar uma flag |
+| PUT | `/flags/<name>` | Atualizar descrição ou estado |
+| DELETE | `/flags/<name>` | Remover uma flag |
+
+Corpo de criação:
+
+```json
+{
+  "name": "enable-new-dashboard",
+  "description": "Ativa o novo dashboard",
+  "is_enabled": true
+}
 ```
 
-Saída esperada: `{"error":"Authorization header obrigatório"}`
+O campo `name` é obrigatório.
+Quando omitidos, `description` recebe uma string vazia e `is_enabled`
+recebe `false`.
 
-**3. Crie uma nova Flag (Com a Chave Correta):**
-```bash
-curl -X POST http://localhost:8002/flags \
--H "Content-Type: application/json" \
--H "Authorization: Bearer SUA_CHAVE_API" \
--d '{
-    "name": "enable-new-dashboard",
-    "description": "Ativa o novo dashboard para usuários",
-    "is_enabled": true
-}'
-```
-Saída esperada: (Um JSON com os dados da flag criada).
+Corpo de atualização:
 
-**4. Liste todas as Flags:**
-```bash
-curl http://localhost:8002/flags \
--H "Authorization: Bearer SUA_CHAVE_API"
+```json
+{
+  "description": "Descricao atualizada",
+  "is_enabled": false
+}
 ```
-Saída esperada: (Uma lista `[]` contendo a flag que você criou).
 
-**5. Desative a Flag (PUT):**
-```bash
-curl -X PUT http://localhost:8002/flags/enable-new-dashboard \
--H "Content-Type: application/json" \
--H "Authorization: Bearer SUA_CHAVE_API" \
--d '{"is_enabled": false}'
+A atualização exige pelo menos um dos campos `description` ou `is_enabled`.
+O nome da flag não é alterado pelo PUT.
+
+## Respostas e falhas
+
+| Situação | HTTP |
+|---|---|
+| Flag criada | 201 |
+| Consulta ou atualização concluída | 200 |
+| Flag removida | 204 |
+| Campos obrigatórios ausentes | 400 |
+| Chave ausente, inválida ou inativa | 401 |
+| Flag não encontrada | 404 |
+| Nome duplicado na criação | 409 |
+| Auth indisponível | 503 |
+| Timeout ao consultar o auth | 504 |
+| Erro interno na operação com o banco de flags | 500 |
+
+O middleware consulta o auth com timeout de três segundos.
+Uma falha do auth não é interpretada como chave inválida.
+
+## Saúde e cache
+
+O `/health` verifica somente a resposta do processo HTTP.
+Este serviço ainda não possui endpoint `/ready`.
+
+Alterações nas definições não invalidam imediatamente o cache do evaluation.
+Dados já armazenados podem continuar sendo utilizados até o TTL de
+30 segundos expirar.
+
+## Operação
+
+A imagem executa a aplicação com Gunicorn.
+
+Para consultar os logs, execute na raiz do repositório:
+
+```powershell
+docker compose logs --tail 30 flag-service
 ```
-Saída esperada: (O JSON da flag atualizada, com `"is_enabled": false`).
+
+O roteiro para criar uma chave, cadastrar uma flag e avaliar seu resultado
+está no [README principal](../README.md).
