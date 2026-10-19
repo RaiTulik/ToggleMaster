@@ -256,9 +256,9 @@ Remove-Item Env:EVENT_ID_TESTE
 ```
 
 O item deve apresentar o mesmo `event_id`, usuário, flag e resultado.
-Como o processamento é assíncrono, repita a consulta caso ela retorne `null`.Como o processamento é assíncrono, execute novamente o bloco inteiro
-de consulta caso ele retorne `null`, começando pela linha
-$env:EVENT_ID_TESTE = $avaliacao.event_id.
+Como o processamento é assíncrono, execute novamente o bloco inteiro
+de consulta caso ele retorne `null`, incluindo a definição de
+`$env:EVENT_ID_TESTE = $avaliacao.event_id`.
 
 Consulte os logs:
 
@@ -308,6 +308,18 @@ docker compose restart evaluation-service
 ```
 
 A chave é carregada pelo evaluation na inicialização.
+
+## Recuperação do PostgreSQL de flags e targeting
+
+Flag e targeting verificam as conexões retiradas do pool e descartam
+conexões quebradas. Após o retorno do banco, novas requisições podem
+ser atendidas sem reiniciar as aplicações.
+
+Falhas de conexão retornam 503. A verificação da conexão pode ser repetida,
+mas operações de escrita não são repetidas automaticamente.
+
+Se a conexão cair durante uma escrita, seu resultado pode ser incerto.
+Consulte o recurso antes de tentar novamente.
 
 ## Cache
 

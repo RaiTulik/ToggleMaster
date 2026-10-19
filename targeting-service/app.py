@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+from contextlib import contextmanager
 from functools import wraps
 
 import psycopg2
@@ -8,7 +9,7 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from psycopg2.extras import Json, RealDictCursor
-from psycopg2.pool import SimpleConnectionPool
+from psycopg2.pool import PoolError, SimpleConnectionPool
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -24,12 +25,131 @@ if not DATABASE_URL or not AUTH_SERVICE_URL:
     log.critical("DATABASE_URL e AUTH_SERVICE_URL devem ser definidos.")
     sys.exit(1)
 
-try:
-    pool = SimpleConnectionPool(1, 5, dsn=DATABASE_URL)
-    log.info("Pool de conexoes com o PostgreSQL (targeting) inicializado.")
-except psycopg2.OperationalError:
-    log.exception("Erro fatal ao conectar ao PostgreSQL.")
-    sys.exit(1)
+pool = None
+
+
+class DatabaseUnavailable(Exception):
+    pass
+
+
+def get_pool():
+    global pool
+
+    if pool is None:
+        pool = SimpleConnectionPool(
+            1,
+            5,
+            dsn=DATABASE_URL,
+            connect_timeout=2,
+            options="-c statement_timeout=2000 -c lock_timeout=1000",
+        )
+        log.info("Pool de conexoes com o PostgreSQL (targeting) inicializado.")
+
+    return pool
+
+
+def release_connection(conn, discard=False):
+    if conn is None:
+        return
+
+    if not discard and not conn.closed:
+        try:
+            conn.rollback()
+        except psycopg2.Error:
+            discard = True
+
+    try:
+        pool.putconn(conn, close=discard or bool(conn.closed))
+    except (psycopg2.Error, PoolError):
+        conn.close()
+        log.exception("Falha ao devolver conexao ao pool.")
+
+
+def checkout_connection():
+    # A repeticao ocorre apenas antes da operacao de negocio.
+    for attempt in range(2):
+        conn = None
+
+        try:
+            conn = get_pool().getconn()
+
+            if conn.closed:
+                raise psycopg2.InterfaceError("Conexao fechada")
+
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+
+            conn.rollback()
+            return conn
+
+        except PoolError as exc:
+            raise DatabaseUnavailable("Pool indisponivel") from exc
+
+        except (
+            psycopg2.OperationalError,
+            psycopg2.InterfaceError,
+        ) as exc:
+            release_connection(conn, discard=True)
+            log.warning(
+                "Conexao PostgreSQL indisponivel na verificacao "
+                "(tentativa %s/2).",
+                attempt + 1,
+            )
+
+            if attempt == 1:
+                raise DatabaseUnavailable(
+                    "Nao foi possivel obter uma conexao valida"
+                ) from exc
+
+        except Exception:
+            release_connection(conn, discard=True)
+            raise
+
+
+@contextmanager
+def database_cursor(write=False):
+    conn = checkout_connection()
+    discard = False
+
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            yield cur
+
+        if write:
+            conn.commit()
+        else:
+            conn.rollback()
+
+    except (
+        psycopg2.OperationalError,
+        psycopg2.InterfaceError,
+    ) as exc:
+        discard = True
+        raise DatabaseUnavailable(
+            "Conexao perdida durante a operacao"
+        ) from exc
+
+    finally:
+        release_connection(conn, discard=discard)
+
+
+@app.errorhandler(DatabaseUnavailable)
+def handle_database_unavailable(error):
+    log.error("Falha de conexao com o banco de targeting: %s", error)
+    return jsonify({
+        "error": "Banco de targeting temporariamente indisponivel",
+        "message": (
+            "Se uma escrita estava em andamento, seu resultado pode "
+            "ser incerto. Consulte o recurso antes de repetir."
+        ),
+    }), 503
+
+
+@app.errorhandler(psycopg2.Error)
+def handle_database_error(error):
+    log.exception("Erro na operacao com o banco de targeting.")
+    return jsonify({"error": "Erro interno do servidor"}), 500
 
 
 def require_auth(f):
@@ -81,7 +201,11 @@ def health():
 @require_auth
 def create_rule():
     data = request.get_json()
-    if not data or "flag_name" not in data or "rules" not in data:
+    if (
+        not isinstance(data, dict)
+        or "flag_name" not in data
+        or "rules" not in data
+    ):
         return jsonify({
             "error": "'flag_name' e 'rules' sao obrigatorios"
         }), 400
@@ -90,76 +214,45 @@ def create_rule():
     rules_obj = data["rules"]
     is_enabled = data.get("is_enabled", True)
 
-    conn = None
-    cur = None
     try:
-        conn = pool.getconn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute(
-            "INSERT INTO targeting_rules "
-            "(flag_name, is_enabled, rules, created_at, updated_at) "
-            "VALUES (%s, %s, %s, NOW(), NOW()) RETURNING *",
-            (flag_name, is_enabled, Json(rules_obj)),
-        )
-        new_rule = cur.fetchone()
-        conn.commit()
-        log.info("Regra para %r criada com sucesso.", flag_name)
-        return jsonify(new_rule), 201
-    except psycopg2.IntegrityError:
-        if conn:
-            conn.rollback()
+        with database_cursor(write=True) as cur:
+            cur.execute(
+                "INSERT INTO targeting_rules "
+                "(flag_name, is_enabled, rules, created_at, updated_at) "
+                "VALUES (%s, %s, %s, NOW(), NOW()) RETURNING *",
+                (flag_name, is_enabled, Json(rules_obj)),
+            )
+            new_rule = cur.fetchone()
+    except psycopg2.errors.UniqueViolation:
         return jsonify({
             "error": f"Regra para a flag '{flag_name}' ja existe"
         }), 409
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        log.exception("Erro ao criar regra.")
-        return jsonify({
-            "error": "Erro interno do servidor",
-            "details": str(e),
-        }), 500
-    finally:
-        if cur:
-            cur.close()
-        if conn:
-            pool.putconn(conn)
+
+    log.info("Regra para %r criada com sucesso.", flag_name)
+    return jsonify(new_rule), 201
 
 
 @app.route("/rules/<string:flag_name>", methods=["GET"])
 @require_auth
 def get_rule(flag_name):
-    conn = None
-    cur = None
-    try:
-        conn = pool.getconn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+    with database_cursor() as cur:
         cur.execute(
             "SELECT * FROM targeting_rules WHERE flag_name = %s",
             (flag_name,),
         )
         rule = cur.fetchone()
-        if not rule:
-            return jsonify({"error": "Regra nao encontrada"}), 404
-        return jsonify(rule)
-    except Exception as e:
-        log.exception("Erro ao buscar regra para %r.", flag_name)
-        return jsonify({
-            "error": "Erro interno do servidor",
-            "details": str(e),
-        }), 500
-    finally:
-        if cur:
-            cur.close()
-        if conn:
-            pool.putconn(conn)
+
+    if not rule:
+        return jsonify({"error": "Regra nao encontrada"}), 404
+
+    return jsonify(rule)
 
 
 @app.route("/rules/<string:flag_name>", methods=["PUT"])
 @require_auth
 def update_rule(flag_name):
     data = request.get_json()
-    if not data:
+    if not isinstance(data, dict) or not data:
         return jsonify({"error": "Corpo da requisicao obrigatorio"}), 400
 
     fields = []
@@ -173,9 +266,7 @@ def update_rule(flag_name):
         values.append(data["is_enabled"])
 
     if not fields:
-        return jsonify({
-            "error": "Informe rules ou is_enabled"
-        }), 400
+        return jsonify({"error": "Informe rules ou is_enabled"}), 400
 
     values.append(flag_name)
     query = (
@@ -183,67 +274,32 @@ def update_rule(flag_name):
         "WHERE flag_name = %s RETURNING *"
     )
 
-    conn = None
-    cur = None
-    try:
-        conn = pool.getconn()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+    with database_cursor(write=True) as cur:
         cur.execute(query, tuple(values))
-
-        if cur.rowcount == 0:
-            return jsonify({"error": "Regra nao encontrada"}), 404
-
         updated_rule = cur.fetchone()
-        conn.commit()
-        log.info("Regra para %r atualizada com sucesso.", flag_name)
-        return jsonify(updated_rule), 200
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        log.exception("Erro ao atualizar regra para %r.", flag_name)
-        return jsonify({
-            "error": "Erro interno do servidor",
-            "details": str(e),
-        }), 500
-    finally:
-        if cur:
-            cur.close()
-        if conn:
-            pool.putconn(conn)
+
+    if not updated_rule:
+        return jsonify({"error": "Regra nao encontrada"}), 404
+
+    log.info("Regra para %r atualizada com sucesso.", flag_name)
+    return jsonify(updated_rule), 200
 
 
 @app.route("/rules/<string:flag_name>", methods=["DELETE"])
 @require_auth
 def delete_rule(flag_name):
-    conn = None
-    cur = None
-    try:
-        conn = pool.getconn()
-        cur = conn.cursor()
+    with database_cursor(write=True) as cur:
         cur.execute(
             "DELETE FROM targeting_rules WHERE flag_name = %s",
             (flag_name,),
         )
+        deleted = cur.rowcount
 
-        if cur.rowcount == 0:
-            return jsonify({"error": "Regra nao encontrada"}), 404
+    if deleted == 0:
+        return jsonify({"error": "Regra nao encontrada"}), 404
 
-        conn.commit()
-        log.info("Regra para %r deletada com sucesso.", flag_name)
-        return "", 204
-    except Exception as e:
-        if conn:
-            conn.rollback()
-        log.exception("Erro ao deletar regra para %r.", flag_name)
-        return jsonify({
-            "error": "Erro interno do servidor",
-            "details": str(e),
-        }), 500
-    finally:
-        if cur:
-            cur.close()
-        if conn:
-            pool.putconn(conn)
+    log.info("Regra para %r deletada com sucesso.", flag_name)
+    return "", 204
 
 
 if __name__ == "__main__":

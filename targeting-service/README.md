@@ -113,6 +113,20 @@ O evaluation distingue uma regra inexistente de uma falha ao consultar
 o targeting. A indisponibilidade do serviço não é tratada como ausência
 de regra.
 
+## Recuperação do banco
+
+As conexões são verificadas antes do uso. Conexões quebradas são
+descartadas, permitindo recuperação após o retorno do PostgreSQL
+sem reiniciar a aplicação.
+
+Falhas de conexão com o banco retornam HTTP 503.
+
+As transações são finalizadas antes da devolução da conexão ao pool.
+Operações de escrita não são repetidas automaticamente.
+
+Se ocorrer perda de conexão durante uma escrita, consulte o recurso
+antes de repetir a operação, pois o resultado pode ser incerto.
+
 ## Operação
 
 A imagem executa a aplicação com Gunicorn.

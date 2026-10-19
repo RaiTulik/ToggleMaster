@@ -82,6 +82,7 @@ O nome da flag não é alterado pelo PUT.
 | Auth indisponível | 503 |
 | Timeout ao consultar o auth | 504 |
 | Erro interno na operação com o banco de flags | 500 |
+| Falha de conexão com o banco do serviço | 503 |
 
 O middleware consulta o auth com timeout de três segundos.
 Uma falha do auth não é interpretada como chave inválida.
@@ -94,6 +95,19 @@ Este serviço ainda não possui endpoint `/ready`.
 Alterações nas definições não invalidam imediatamente o cache do evaluation.
 Dados já armazenados podem continuar sendo utilizados até o TTL de
 30 segundos expirar.
+
+## Recuperação do banco
+
+As conexões são verificadas antes do uso. Conexões quebradas são
+descartadas, permitindo recuperação após o retorno do PostgreSQL
+sem reiniciar a aplicação.
+
+As transações são finalizadas antes da devolução da conexão ao pool.
+Operações de escrita não são repetidas automaticamente.
+
+Se ocorrer perda de conexão durante uma escrita, consulte o recurso
+antes de repetir a operação, pois o resultado pode ser incerto.
+
 
 ## Operação
 
