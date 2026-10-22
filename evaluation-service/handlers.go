@@ -69,13 +69,12 @@ func (a *App) readinessHandler(w http.ResponseWriter, r *http.Request) {
 
 	if a.Publisher != nil {
 		a.Publisher.mu.RLock()
-		unavailable := a.Publisher.stopped ||
-			len(a.Publisher.events) == cap(a.Publisher.events)
+		stopped := a.Publisher.stopped
 		a.Publisher.mu.RUnlock()
 
-		if unavailable {
+		if stopped {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-				"status": "publicador indisponivel",
+				"status": "publicador encerrando",
 			})
 			return
 		}
@@ -130,21 +129,26 @@ func (a *App) evaluationHandler(w http.ResponseWriter, r *http.Request) {
 	eventID := ""
 	if a.Publisher != nil {
 		eventID, err = a.Publisher.enqueue(userID, flagName, result)
+
 		if err != nil {
-			if errors.Is(err, errEventQueueFull) ||
-				errors.Is(err, errPublisherStopped) {
-				w.Header().Set("Retry-After", "1")
+			if errors.Is(err, errEventQueueFull) {
+				log.Printf(
+					"Evento de analytics descartado: fila interna cheia; usuario=%q flag=%q",
+					userID, flagName,
+				)
+				eventID = ""
+			} else if errors.Is(err, errPublisherStopped) {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]string{
-					"error": "Publicador ocupado ou encerrando; tente novamente",
+					"error": "Servico encerrando",
+				})
+				return
+			} else {
+				log.Printf("Erro ao preparar evento: %v", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{
+					"error": "Erro ao preparar evento",
 				})
 				return
 			}
-
-			log.Printf("Erro ao preparar evento: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "Erro ao preparar evento",
-			})
-			return
 		}
 	} else {
 		log.Printf(
