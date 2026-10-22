@@ -197,6 +197,21 @@ def health():
     return jsonify({"status": "ok"})
 
 
+# Readiness: verifica se o PostgreSQL aceita conexoes.
+@app.route("/ready")
+def ready():
+    conn = None
+
+    try:
+        conn = checkout_connection()
+        return jsonify({"status": "ready"}), 200
+    except (DatabaseUnavailable, psycopg2.Error):
+        return jsonify({"status": "not ready"}), 503
+    finally:
+        if conn is not None:
+            release_connection(conn)
+
+
 @app.route("/rules", methods=["POST"])
 @require_auth
 def create_rule():
