@@ -5,23 +5,15 @@ desenvolvido na pós-graduação da FIAP.
 
 ## Status
 
-O ambiente local integrado está implementado e foi validado com Docker Compose.
+**Fase 2 — implementação local e implantação AWS realizadas e validadas.**
 
-Foram testados:
-- Inicialização com volumes novos.
-- Criação e validação de chaves de API.
-- Segregação dos usuários de aplicação nos bancos PostgreSQL.
-- Criação e consulta de flags e regras de segmentação.
-- Avaliação de flags e uso do cache Redis.
-- Publicação de eventos no SQS local e persistência no DynamoDB local.
-- Reconhecimento de eventos repetidos.
-- Encerramento controlado do evaluation e do analytics.
-- Encaminhamento de mensagens inválidas para a DLQ.
-- Persistência dos dados após recriação dos containers de SQS e DynamoDB.
-- Indisponibilidade e recuperação do DynamoDB.
-- Diferenciação entre credenciais inválidas e falhas de autenticação.
+O ambiente local foi implementado com Docker Compose e testado com volumes novos, criação e validação de chaves de API, bancos segregados, flags e regras, avaliação com Redis, publicação e consumo de eventos, persistência no DynamoDB Local, idempotência, DLQ, recuperação de dependências e encerramento controlado.
 
-A implantação em cloud e a configuração Kubernetes/GitOps são etapas posteriores.
+Na AWS Academy foram implantados cinco microsserviços no Amazon EKS, com imagens no Amazon ECR, três bancos Amazon RDS PostgreSQL, Amazon ElastiCache Redis, Amazon SQS e Amazon DynamoDB. O cluster utiliza NGINX Ingress Controller, Metrics Server e HPA de CPU para Evaluation e Analytics.
+
+**Validações realizadas na AWS:** cinco pods funcionais, acesso externo a `/evaluate` com HTTP 200, criação/consulta/exclusão de regras no Targeting, Evaluation HPA escalando de 1 para 3 réplicas, Analytics HPA chegando a 2 réplicas e eventos entregues via SQS e gravados no DynamoDB. Em um teste de carga foram encontrados **8.708 eventos** do usuário de teste na tabela. Uma mensagem enviada manualmente ao SQS também foi confirmada no DynamoDB.
+
+> Os recursos AWS pertencem a um laboratório temporário e podem deixar de estar disponíveis após seu encerramento. Os resultados acima descrevem testes realizados, não disponibilidade permanente.
 
 ## Arquitetura local
 
@@ -154,8 +146,8 @@ As portas publicadas estão vinculadas a `127.0.0.1`.
 | Serviço | Porta | Liveness | Readiness |
 |---|---|---|---|
 | Auth | 8001 | `/health` | `/ready` |
-| Flag | 8002 | `/health` | Não implementado |
-| Targeting | 8003 | `/health` | Não implementado |
+| Flag | 8002 | `/health` | `/ready` |
+| Targeting | 8003 | `/health` | `/ready` |
 | Evaluation | 8004 | `/health` | `/ready` |
 | Analytics | 8005 | `/health` | `/ready` |
 
@@ -165,7 +157,7 @@ do Compose, sem publicação de portas no host.
 Os endpoints `/health` verificam a resposta do processo HTTP.
 Eles não comprovam a disponibilidade de todas as dependências.
 
-A prontidão do auth verifica a conexão com PostgreSQL.
+A prontidão do auth, do flag e do targeting verifica a conexão com PostgreSQL.
 A do evaluation verifica Redis, encerramento e capacidade da fila interna.
 A do analytics considera a execução do consumidor e suas verificações
 recentes de DynamoDB e SQS.
@@ -174,6 +166,8 @@ Confira a prontidão:
 
 ```powershell
 Invoke-RestMethod -Uri "http://localhost:8001/ready"
+Invoke-RestMethod -Uri "http://localhost:8002/ready"
+Invoke-RestMethod -Uri "http://localhost:8003/ready"
 Invoke-RestMethod -Uri "http://localhost:8004/ready"
 Invoke-RestMethod -Uri "http://localhost:8005/ready"
 ```
@@ -361,21 +355,180 @@ docker compose down
 Adicionar `--volumes` ao comando `down` remove também os volumes e seus dados.
 Esse procedimento não faz parte da operação normal.
 
-## Próximas etapas
+## Arquitetura AWS — Fase 2
 
-- Implantação das imagens no Amazon ECR.
-- Implantação dos serviços no Amazon EKS.
-- Uso dos serviços gerenciados de dados e mensageria na AWS.
-- Configuração Kubernetes de recursos, probes e escalabilidade.
-- GitOps com Argo CD.
-- Gestão de segredos com External Secrets Operator.
-- HPA para evaluation e avaliação de KEDA para analytics,
-  conforme as permissões do ambiente AWS.
+A implantação foi realizada na região `us-east-1` em ambiente **AWS Academy**, com recursos configurados no laboratório e manifests Kubernetes versionados em `kubernetes/`.
 
-O repositório destinado às configurações GitOps é:
-https://github.com/RaiTulik/ToggleMaster-GitOps
+| Camada | Recurso | Uso |
+|---|---|---|
+| Contêineres | Amazon ECR | Cinco imagens dos microsserviços, tag `fase2` |
+| Orquestração | Amazon EKS | Cluster `togglemaster-eks`, com Managed Node Group e dois nós EC2 |
+| Entrada HTTP | NGINX Ingress Controller + balanceador AWS | Encaminhamento externo de `/evaluate` ao Evaluation |
+| Autenticação | Amazon RDS PostgreSQL | Instância `togglemaster-auth-db`, banco `authdb` |
+| Flags | Amazon RDS PostgreSQL | Instância `togglemaster-flag-db`, banco `flagdb` |
+| Segmentação | Amazon RDS PostgreSQL | Instância `togglemaster-targeting-db`, banco `targetingdb` |
+| Cache | Amazon ElastiCache Redis | Cache consultado pelo Evaluation |
+| Eventos | Amazon SQS Standard | Fila `togglemaster-events`, com fila de mensagens mortas (DLQ) |
+| Analytics | Amazon DynamoDB | Tabela `ToggleMasterAnalytics`, chave de partição `event_id` |
+| Métricas | Kubernetes Metrics Server | Métricas de CPU utilizadas pelos HPAs |
 
-Essas etapas não são apresentadas como concluídas nesta documentação.
+Fluxo simplificado:
+
+```text
+Cliente HTTP
+    |
+    v
+AWS Load Balancer -> NGINX Ingress (/evaluate)
+                          |
+                          v
+                  Evaluation Service <----> ElastiCache Redis
+                     |       |
+                     |       +--> Flag Service ------> RDS flags
+                     |       +--> Targeting Service -> RDS targeting
+                     |                    |
+                     |                    +--> Auth Service -> RDS auth
+                     v
+                 Amazon SQS (+ DLQ)
+                     |
+                     v
+                Analytics Service
+                     |
+                     v
+              Amazon DynamoDB
+```
+
+O Auth valida chaves usadas pelos endpoints protegidos. O Evaluation utiliza uma chave de serviço para comunicação interna e publica eventos de avaliação de forma assíncrona. O Analytics consome mensagens e persiste os eventos na tabela DynamoDB.
+
+### Kubernetes e manifests
+
+Os arquivos versionados estão organizados assim:
+
+```text
+kubernetes/
+  namespace.yaml
+  ingress.yaml
+  shared/configmap.yaml
+  auth/{deployment,service}.yaml
+  flag/{deployment,service}.yaml
+  targeting/{deployment,service}.yaml
+  evaluation/{deployment,service,hpa}.yaml
+  analytics/{deployment,service,hpa}.yaml
+```
+
+Todos os cinco serviços possuem `Deployment`, `Service` interno (`ClusterIP`), `readinessProbe` em `/ready`, `livenessProbe` em `/health`, e limites/solicitações de CPU e memória. Os serviços usam as portas 8001 (Auth), 8002 (Flag), 8003 (Targeting), 8004 (Evaluation) e 8005 (Analytics).
+
+| Serviço | CPU request | CPU limit | Memória request | Memória limit |
+|---|---:|---:|---:|---:|
+| Auth | 50m | 250m | 64Mi | 256Mi |
+| Flag | 50m | 250m | 64Mi | 256Mi |
+| Targeting | 50m | 250m | 64Mi | 256Mi |
+| Evaluation | 100m | 500m | 128Mi | 512Mi |
+| Analytics | 100m | 500m | 128Mi | 512Mi |
+
+O ConfigMap `togglemaster-config` centraliza `AWS_REGION`, `AWS_DYNAMODB_TABLE`, `AWS_SQS_URL` e as URLs internas dos serviços Auth, Flag e Targeting. Os endereços `http://auth-service:8001`, `http://flag-service:8002` e `http://targeting-service:8003` utilizam resolução DNS interna do Kubernetes.
+
+O Ingress `togglemaster-ingress`, com classe `nginx`, publica **apenas** o caminho `/evaluate` para o `evaluation-service` na porta 8004. As demais APIs não são expostas por esse Ingress. O balanceador público é criado pelo controlador instalado no cluster; o manifesto do controlador e sua instalação não estão automatizados neste repositório.
+
+### Secrets e cuidados de segurança
+
+**Os valores de Secrets não são versionados.** Antes de aplicar os Deployments, é necessário criar no namespace `togglemaster`:
+
+| Secret | Chaves exigidas |
+|---|---|
+| `auth-secrets` | `DATABASE_URL`, `MASTER_KEY` |
+| `flag-secrets` | `DATABASE_URL` |
+| `targeting-secrets` | `DATABASE_URL` |
+| `evaluation-secrets` | `REDIS_URL`, `SERVICE_API_KEY` |
+
+`DATABASE_URL` contém a string de conexão de cada RDS, `REDIS_URL` aponta para o ElastiCache e `SERVICE_API_KEY` deve corresponder a uma chave válida no Auth. Não publique senhas, tokens, chaves nem manifests de Secrets com valores reais. Crie os Secrets com um método seguro apropriado ao ambiente antes de executar os manifests. A chave da aplicação e os dados iniciais dos bancos também precisam ser preparados para uma nova implantação.
+
+As imagens ECR e a URL SQS dos manifests contêm o ID de conta do laboratório. **Para reproduzir em outra conta AWS, altere essas referências**, além dos endpoints dos serviços gerenciados, credenciais e políticas de rede.
+
+### Implantação e verificação
+
+Pré-requisitos para uma implantação equivalente: AWS CLI autenticado e autorizado, `kubectl` configurado para o cluster EKS, imagens publicadas no ECR, três RDS acessíveis pelos pods, ElastiCache, fila SQS/DLQ, tabela DynamoDB, controlador NGINX Ingress e Metrics Server instalados, além de Secrets e dados iniciais preparados.
+
+Exemplo de conexão e inspeção do cluster existente:
+
+```powershell
+aws eks update-kubeconfig --region us-east-1 --name togglemaster-eks --profile academy
+kubectl get nodes
+kubectl get pods -n togglemaster
+kubectl get deployments,services,ingress,hpa -n togglemaster
+```
+
+Com todas as dependências provisionadas e os Secrets criados, os manifests podem ser aplicados na ordem abaixo:
+
+```powershell
+kubectl apply -f kubernetes/namespace.yaml
+kubectl apply -f kubernetes/shared/configmap.yaml
+kubectl apply -f kubernetes/auth/
+kubectl apply -f kubernetes/flag/
+kubectl apply -f kubernetes/targeting/
+kubectl apply -f kubernetes/evaluation/
+kubectl apply -f kubernetes/analytics/
+kubectl apply -f kubernetes/ingress.yaml
+kubectl get pods -n togglemaster
+kubectl get hpa -n togglemaster
+```
+
+**Atenção:** os comandos acima **não criam** EKS, ECR, RDS, ElastiCache, SQS, DynamoDB, NGINX Ingress Controller, Metrics Server ou Secrets. Esses componentes precisam existir antes. A infraestrutura foi configurada no AWS Academy e não está integralmente declarada como IaC neste repositório.
+
+Para consultar o endereço do Ingress:
+
+```powershell
+kubectl get ingress togglemaster-ingress -n togglemaster
+kubectl get svc -n ingress-nginx
+```
+
+Com o hostname retornado pelo balanceador, é possível validar a rota pública:
+
+```powershell
+$ingressHost = "SUBSTITUIR_PELO_HOSTNAME_DO_BALANCEADOR"
+Invoke-RestMethod -Uri "http://$ingressHost/evaluate?user_id=teste-readme&flag_name=aws-video-flag"
+```
+
+O exemplo usa a flag de demonstração `aws-video-flag`, que precisa existir no banco de flags para reproduzir o cenário. Uma resposta HTTP 200 com `event_id` comprova o atendimento da requisição, mas a persistência do evento é assíncrona e deve ser verificada separadamente.
+
+### Escalabilidade automática
+
+Os manifests `kubernetes/evaluation/hpa.yaml` e `kubernetes/analytics/hpa.yaml` usam `autoscaling/v2`, métrica de **CPU**, meta de **60% de utilização** e faixa de **1 a 3 réplicas** por serviço. A utilização é calculada sobre o CPU *request* (100m para ambos), não sobre o limite de 500m.
+
+```powershell
+kubectl get hpa -n togglemaster -w
+```
+
+Nos testes realizados, o Evaluation escalou de **1 para 3 réplicas** durante requisições concorrentes; o Analytics atingiu **2 réplicas**. Os resultados dependem da carga e das métricas observadas no momento, não sendo garantidos em toda execução. O HPA do Analytics reage a CPU, **não** diretamente ao tamanho da fila SQS. KEDA não foi implantado; o HPA nativo foi a alternativa utilizada no laboratório.
+
+### Evidências funcionais obtidas na AWS
+
+- **Pods e dependências:** cinco microsserviços em execução no EKS, com readiness e liveness configuradas.
+- **Entrada externa:** requisição `GET /evaluate` pelo NGINX Ingress retornou HTTP 200 e `event_id`.
+- **Targeting + RDS + Auth:** criação de regra (`POST /rules`, HTTP 201), consulta (`GET /rules/{id}`, HTTP 200) e exclusão (`DELETE /rules/{id}`, HTTP 204) executadas com sucesso a partir do ambiente Kubernetes.
+- **HPA Evaluation:** escala de 1 para 3 réplicas sob carga, com CPU observada acima da meta de 60%.
+- **Eventos de avaliação:** teste de carga resultou em **8.708 itens** identificados pelo usuário de teste `teste-carga` na tabela DynamoDB, evidenciando o fluxo Evaluation → SQS → Analytics → DynamoDB.
+- **SQS manual:** envio de mensagem à fila `togglemaster-events`, seguido de consulta por `event_id` no DynamoDB, confirmou o processamento assíncrono.
+- **HPA Analytics:** observada escala de 1 para 2 réplicas durante os testes.
+
+Essas são observações da execução realizada, não um teste de desempenho padronizado ou uma garantia de entrega de mensagens em quaisquer condições.
+
+### Restrições e decisões do AWS Academy
+
+O laboratório possui permissões limitadas e utiliza o papel IAM `LabRole`. O acesso do Analytics a SQS e DynamoDB foi viabilizado pelas credenciais disponibilizadas ao nó EC2 no laboratório, incluindo ajuste de alcance do serviço de metadados da instância (IMDSv2). **Esse é um expediente específico do ambiente acadêmico**, não uma recomendação para produção. Em uma implantação real, o acesso deveria ser concedido com identidade e permissões mínimas por workload (por exemplo, EKS Pod Identity ou IRSA, conforme as permissões disponíveis), sem compartilhar privilégios do nó.
+
+Os recursos gerenciados, o balanceador e os nós EC2 podem gerar custos enquanto estiverem ativos. É necessário acompanhar o orçamento/créditos do laboratório e encerrar os recursos quando a demonstração não for mais necessária.
+
+### Recursos não implementados e possíveis evoluções
+
+A implantação realizada **não inclui** GitOps operacional com Argo CD, External Secrets Operator nem escalonamento por tamanho de fila com KEDA. Esses itens foram considerados como possíveis evoluções, mas não são apresentados como concluídos. Também não há provisionamento integral da infraestrutura por Terraform ou CloudFormation neste repositório.
+
+Repositório reservado para eventual evolução de GitOps: https://github.com/RaiTulik/ToggleMaster-GitOps
+
+### Entregáveis acadêmicos
+
+- **Código-fonte e manifests:** https://github.com/RaiTulik/ToggleMaster
+- **Vídeo de demonstração (até 20 minutos):** inserir link após a gravação.
+- **Relatório de entrega:** incluir participantes, RM, usuários do Discord, link do repositório, link do vídeo, diagrama da arquitetura e justificativas técnicas exigidas pelo enunciado.
 
 ## Origem dos códigos
 
