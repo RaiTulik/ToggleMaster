@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: targeting-service
-          image: TARGETING_ECR_IMAGE_PLACEHOLDER
+          image: 453289458005.dkr.ecr.us-east-1.amazonaws.com/togglemaster/targeting-service:fase2
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
